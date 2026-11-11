@@ -1846,6 +1846,39 @@
       Object.keys(_prev).forEach(id => { if (!cur[id] && cancelledMine[id]) alert(`🚫 ${_prev[id].roomName} ${_prev[id].startTime}-${_prev[id].endTime} ถูกยกเลิก: ${cancelledMine[id].cancelReason || ''}`); });
       _prev = cur;
     }
+
+    // ===== 📣 แจ้งปัญหา / ส่งความคิดเห็น =====
+    let _lastReport = 0;
+    function openReportForm() {
+      const rooms = ALL_ROOMS.map(r => `<option>${r.name}</option>`).join('');
+      const cls = 'w-full p-2.5 border rounded-lg bg-white dark:bg-gray-800 dark:border-gray-700 dark:text-white text-sm';
+      document.getElementById('modalContent').innerHTML = `
+        <h3 class="font-bold text-chula-main dark:text-red-400 text-base mb-1">📣 แจ้งปัญหา / ส่งความคิดเห็น</h3>
+        <p class="text-xs text-gray-500 mb-3">เช่น อุปกรณ์ชำรุด ห้องมีปัญหา ระบบใช้งานยาก หรือข้อเสนอแนะ เจ้าหน้าที่จะรับเรื่องและดำเนินการ</p>
+        <div class="space-y-2">
+          <select id="rpCat" class="${cls}"><option value="equip">🔧 อุปกรณ์ชำรุด</option><option value="room">🏠 ห้อง/สถานที่</option><option value="system">💻 ระบบจอง</option><option value="idea">💡 ข้อเสนอแนะ</option><option value="other">📝 อื่นๆ</option></select>
+          <select id="rpRoom" class="${cls}"><option value="">ไม่ระบุห้อง</option>${rooms}</select>
+          <textarea id="rpDetail" rows="4" maxlength="500" placeholder="อธิบายปัญหา เช่น ปลั๊กห้อง Study Room 3 ใช้ไม่ได้" class="${cls}"></textarea>
+          <input id="rpContact" maxlength="80" placeholder="ช่องทางติดต่อกลับ (ไม่บังคับ)" value="${currentUser && currentUser.studentId ? currentUser.studentId : ''}" class="${cls}">
+        </div>
+        <div class="mt-4 flex justify-end space-x-2"><button onclick="closeModal()" class="px-3 py-2 bg-gray-200 text-gray-700 rounded text-xs">ยกเลิก</button><button id="btnSendReport" onclick="submitReport()" class="px-3 py-2 bg-chula-main text-white rounded text-xs font-bold">ส่งเรื่อง</button></div>`;
+      document.getElementById('modalOverlay').classList.remove('hidden');
+    }
+    async function submitReport() {
+      const detail = document.getElementById('rpDetail').value.trim();
+      if (detail.length < 5) { alert('กรุณาอธิบายปัญหาอย่างน้อย 5 ตัวอักษร'); return; }
+      if (Date.now() - _lastReport < 30000) { alert('ส่งบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่'); return; }
+      const btn = document.getElementById('btnSendReport'); btn.disabled = true;
+      try {
+        await db.collection('reports').add({ category: document.getElementById('rpCat').value, roomName: document.getElementById('rpRoom').value, detail, contact: document.getElementById('rpContact').value.trim(), studentId: currentUser && currentUser.studentId ? currentUser.studentId : '', status: 'new', source: 'web', createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+        _lastReport = Date.now(); closeModal(); alert('✅ ส่งเรื่องเรียบร้อย ขอบคุณที่แจ้งครับ เจ้าหน้าที่จะตรวจสอบโดยเร็ว');
+      } catch (e) { btn.disabled = false; alert('ส่งไม่สำเร็จ กรุณาลองใหม่หรือแจ้งเจ้าหน้าที่ที่เคาน์เตอร์'); }
+    }
+    (function () {
+      const b = document.createElement('button'); b.id = 'fabReport';
+      b.className = 'fixed bottom-4 right-4 z-40 px-4 py-3 rounded-full shadow-xl bg-chula-main text-white text-sm font-bold';
+      b.textContent = '📣 แจ้งปัญหา'; b.onclick = openReportForm; document.body.appendChild(b);
+    })();
   </script>
 </body>
 </html>
