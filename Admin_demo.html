@@ -1457,6 +1457,199 @@
       line-height: 1;
     }
   </style>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+<script>
+(function () {
+  const CFG = { apiKey: "AIzaSyAAIQqx48PCSJbo3kKbZ1QPOg4hO_VFxR8", authDomain: "expl-eng.firebaseapp.com", projectId: "expl-eng", storageBucket: "expl-eng.firebasestorage.app", messagingSenderId: "317681931288", appId: "1:317681931288:web:2b7d48c63dd9285e799f6d" };
+  const DOM = '@eng-library.local', ADMIN_NAME = 'Admin (ส่วนกลาง)';
+  function memDb() {
+    const C = {}, S = {}; let n = 0;
+    const snap = k => { const d = Object.entries(C[k]).map(([id, v]) => ({ id, data: () => v })); return { forEach: f => d.forEach(f) }; };
+    const emit = k => (S[k] || []).forEach(f => f(snap(k)));
+    return { collection: k => { C[k] = C[k] || {}; return {
+      onSnapshot: f => { (S[k] = S[k] || []).push(f); setTimeout(() => f(snap(k))); return () => { }; },
+      add: async d => { const id = 'm' + (++n); C[k][id] = d; emit(k); return { id }; },
+      doc: id => ({ get: async () => ({ exists: !!C[k][id], data: () => C[k][id] }), set: async o => { C[k][id] = o; emit(k); }, update: async o => { if (C[k][id]) Object.assign(C[k][id], o); emit(k); }, delete: async () => { delete C[k][id]; emit(k); } })
+    }; } };
+  }
+  let db = null, auth = null, DEMO = false;
+  try { firebase.initializeApp(CFG); db = firebase.firestore(); auth = firebase.auth(); } catch (e) { }
+  if (!db) { DEMO = true; db = memDb(); }
+  const TS = () => DEMO ? Date.now() : firebase.firestore.FieldValue.serverTimestamp();
+  window.fbSignOut = () => { loggedIn = false; try { auth && auth.signOut(); } catch (e) { } };
+
+  const ROOMS = { groups: { 'Seminar': { capacity: 12, rooms: ['Seminar Room A', 'Seminar Room B', 'Seminar Room C'] }, 'Study Room': { capacity: 12, rooms: [1, 2, 3, 4, 5, 6, 7].map(i => 'Study Room ' + i) }, 'The Box': { capacity: 1, rooms: 'ABCDEF'.split('').map(l => 'The Box ' + l) } } };
+  const defSet = () => ({ open: 8, close: 19, open_wd: 8, close_wd: 19, open_sat: 9, close_sat: 17, open_sun: 9, close_sun: 17, closed_wd: false, closed_sat: false, closed_sun: false, staffs: [ADMIN_NAME], staffCredentials: [{ name: ADMIN_NAME, username: 'admin', password: '', isAdmin: true }], accessories: [], roomConfig: ROOMS, roomStatus: {}, roomHidden: {}, announcement: '', bookingConfig: {} });
+  let SET = null, BK = [], idMap = {}, revMap = {}, seq = 0, ready = null, started = false, tmr = null;
+  const rid = id => idMap[id] || (idMap[id] = ++seq, revMap[seq] = id, seq);
+  const PJ = v => typeof v === 'string' ? JSON.parse(v || '{}') : (v || {});
+  const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const roomIdOf = n => { let m; if ((m = /^Study Room (\d+)/.exec(n))) return 'study_' + m[1]; if ((m = /^Seminar Room (\w)/.exec(n))) return 'sem_' + m[1].toLowerCase(); if ((m = /^The Box (\w)/.exec(n))) return 'box_' + m[1].toLowerCase(); return String(n).replace(/\s+/g, '_').toLowerCase(); };
+  const stOf = b => b.status === 'pending' ? 'รอเช็คอิน' : b.status === 'checked_out' ? 'เช็คเอาต์แล้ว' : b.status === 'cancelled' ? 'ยกเลิกแล้ว' : 'มาแล้ว';
+  const label = b => (b.bookerName || '-') + (b.roomTitle ? ' 🏷️' + b.roomTitle : '') + (b.isShareable ? ' 🤝' + (b.studentIds || []).length + '/12' : '') + (b.cancelRequest && b.cancelRequest.status === 'requested' ? ' 🚫ขอยกเลิก' : '');
+  const clean = s => String(s || '').replace(/\s*(🏷️|🤝|🚫).*$/u, '').trim();
+  const logIt = p => { try { db.collection('system_logs').add({ ...p, page: 'Adminoow', at: TS() }); } catch (e) { } };
+
+  async function getSet() { if (SET) return; const d = await db.collection('settings').doc('main').get(); let s = {}; try { s = d.exists ? JSON.parse(d.data().json) : {}; } catch (e) { } SET = Object.assign(defSet(), s); }
+  const saveSet = () => db.collection('settings').doc('main').set({ json: JSON.stringify(SET) });
+  function start() {
+    if (started) return; started = true;
+    ready = new Promise(res => { db.collection('bookings').onSnapshot(s => { BK = []; s.forEach(d => BK.push({ id: d.id, ...d.data() })); res(); changed(); }, e => { console.error(e); res(); }); });
+    setInterval(cleanup, 30000);
+  }
+  let loggedIn = false;
+  const authReady = new Promise(res => {
+    if (DEMO) return res();
+    auth.onAuthStateChanged(u => { res(); if (!u) { try { if (sessionStorage.getItem('adminUser')) { sessionStorage.removeItem('adminUser'); location.reload(); } } catch (e) { } } });
+  });
+  // ยังไม่ล็อกอิน = ไม่อ่าน/ไม่เขียนข้อมูล (คำขอจะรอจนกว่าจะล็อกอิน)
+  const authed = async () => { await authReady; if (DEMO ? !loggedIn : !auth.currentUser) await new Promise(() => { }); };
+  const ensure = async () => { await authed(); await getSet(); start(); await ready; };
+  function changed() {
+    cleanup(); clearTimeout(tmr);
+    tmr = setTimeout(() => { try { if (typeof currentUser !== 'undefined' && currentUser && typeof refreshSchedule === 'function') refreshSchedule(true); } catch (e) { } renderPanel(); }, 300);
+  }
+  function cleanup() {
+    const now = Date.now();
+    BK.forEach(b => {
+      if (b.status === 'cancelled' || b.status === 'checked_out' || b.ignoreLateCancel) return;
+      const dl = b.confirmDeadline || (new Date(b.date + 'T' + b.startTime + ':00').getTime() + 9e5);
+      if (now < dl) return;
+      const under = b.isShareable && !/^The Box/.test(b.roomName || '') && (b.studentIds || []).length < 4;
+      if (b.status !== 'pending' && !under) return;
+      db.collection('bookings').doc(b.id).update({ status: 'cancelled', cancelReason: b.status === 'pending' ? 'ไม่ได้รับการยืนยันภายใน 15 นาที' : 'สมาชิกห้องแชร์ไม่ครบ 4 คน' }).catch(() => { });
+    });
+  }
+  function hours(dateStr) {
+    const dow = new Date(dateStr + 'T00:00:00').getDay(), k = dow === 0 ? 'sun' : dow === 6 ? 'sat' : 'wd';
+    return { open: parseInt(SET['open_' + k] || SET.open, 10), close: parseInt(SET['close_' + k] || SET.close, 10), closed: SET['closed_' + k] === true };
+  }
+  function build(dateStr) {
+    const h = hours(dateStr), rc = SET.roomConfig || ROOMS, rooms = [], groups = {};
+    Object.keys(rc.groups).forEach(g => { groups[g] = rc.groups[g].rooms || []; groups[g].forEach(r => rooms.push(r)); });
+    const base = { rooms, groups, today: dateStr, roomStatus: SET.roomStatus || {}, roomConfig: rc, roomHidden: SET.roomHidden || {}, announcement: SET.announcement || '', dayClosed: h.closed };
+    if (h.closed) return { ...base, timeSlots: [], tableData: {}, roomStatus: {} };
+    const times = [];
+    for (let x = h.open; x <= h.close; x++) for (let m = 0; m < 60; m += 15) { if (x === h.close && m > 0) break; times.push(String(x).padStart(2, '0') + ':' + String(m).padStart(2, '0')); }
+    const td = {};
+    rooms.forEach(r => { td[r] = {}; times.forEach(t => td[r][t] = { status: 'free', name: '', checkin: '', code: '', accessories: '', rowIdx: -1 }); });
+    BK.filter(b => b.date === dateStr && b.status !== 'cancelled' && b.status !== 'checked_out' && td[b.roomName]).forEach(b => {
+      let on = false; const code = b.code || ('B' + b.id.slice(-5).toUpperCase());
+      times.forEach(t => {
+        if (t === b.startTime) on = true; if (t === b.endTime) on = false;
+        if (on) td[b.roomName][t] = { status: 'busy', name: label(b), studentIds: (b.studentIds || []).join(', '), email: b.bookerEmail || '', checkin: stOf(b), code, accessories: b.accessories || '', rowIdx: rid(b.id), source: b.source === 'admin' ? 'admin' : 'web', ignoreLateCancel: !!b.ignoreLateCancel, accStaff: b.accStaff || '' };
+      });
+    });
+    return { ...base, timeSlots: times, tableData: td };
+  }
+  const idsOf = s => String(s || '').split(',').map(x => x.trim()).filter(Boolean);
+  const details = (ids, st, en) => ids.map(id => ({ studentId: id, email: id + '@student.chula.ac.th', startTime: st, endTime: en }));
+
+  const FN = {
+    async checkStaffLogin(u, p) {
+      u = (u || '').trim(); const email = u.includes('@') ? u : u.toLowerCase() + DOM;
+      try { if (DEMO) { if (p !== 'demo1234') throw 0; loggedIn = true; } else await auth.signInWithEmailAndPassword(email, p); }
+      catch (e) { logIt({ userName: u, action: 'LOGIN_FAILED', status: 'FAILED' }); return { success: false }; }
+      await ensure();
+      const un = u.split('@')[0].toLowerCase(), c = SET.staffCredentials.find(x => (x.username || '').toLowerCase() === un);
+      const isAdmin = un === 'admin' || (c && (c.isAdmin || c.name === ADMIN_NAME));
+      const name = c ? c.name : (un === 'admin' ? ADMIN_NAME : un);
+      logIt({ userName: name, action: 'LOGIN_SUCCESS', status: 'SUCCESS', details: 'Role: ' + (isAdmin ? 'admin' : 'staff') });
+      return { success: true, role: isAdmin ? 'admin' : 'staff', displayName: name };
+    },
+    async getScriptUrl() { return new URL('index.html', location.href).href; },
+    async getTimeSlotData(d) { await ensure(); return build(d); },
+    async getInitialData(d) { await ensure(); return { settings: SET, schedule: build(d) }; },
+    async getLibrarySettings() { await ensure(); return SET; },
+    async saveLibrarySettings(x) { await ensure(); ['wd', 'sat', 'sun'].forEach(k => { SET['open_' + k] = parseInt(x['open_' + k] || x.open, 10); SET['close_' + k] = parseInt(x['close_' + k] || x.close, 10); SET['closed_' + k] = x['closed_' + k] === true; }); SET.open = SET.open_wd; SET.close = SET.close_wd; await saveSet(); return true; },
+    async saveBookingConfig(c) { await ensure(); SET.bookingConfig = PJ(c); await saveSet(); return { success: true }; },
+    async saveAnnouncement(t) { await ensure(); SET.announcement = t || ''; await saveSet(); return { success: true }; },
+    async saveAccessoriesList(l) { await ensure(); SET.accessories = l || []; await saveSet(); return { success: true }; },
+    async saveStaffNames(l) { await ensure(); SET.staffs = l || []; await saveSet(); return { success: true }; },
+    async addSingleStaff(name, username, pw, isAdmin) { await ensure(); SET.staffs = [...new Set([...SET.staffs, name])]; SET.staffCredentials = SET.staffCredentials.filter(c => c.name !== name).concat({ name, username, password: '', isAdmin: !!isAdmin }); await saveSet(); return { success: true }; },
+    async deleteStaffByName(n) { await ensure(); SET.staffs = SET.staffs.filter(x => x !== n); SET.staffCredentials = SET.staffCredentials.filter(c => c.name !== n); await saveSet(); return { success: true }; },
+    async saveStaffCredentials(a) { await ensure(); SET.staffCredentials = (a || []).map(c => ({ name: c.name, username: c.username || '', password: '', isAdmin: !!c.isAdmin })); await saveSet(); return { success: true }; },
+    async saveRoomConfigAndStatus(cfg, st, hid) { await ensure(); SET.roomConfig = PJ(cfg); SET.roomStatus = PJ(st); SET.roomHidden = PJ(hid); await saveSet(); return { success: true }; },
+    async saveSystemLog(p) { logIt(p || {}); return true; },
+    async updateBookingStatus(row, status, staff) {
+      await ensure(); const id = revMap[row], b = BK.find(x => x.id === id); if (!b) return { success: false, message: 'ไม่พบรายการจอง' };
+      let o;
+      if (status === 'ยกเลิกแล้ว') o = { status: 'cancelled', cancelReason: 'เจ้าหน้าที่ยกเลิก (' + (staff || '') + ')' };
+      else if (status === 'เช็คเอาต์แล้ว' || status === 'ออกแล้ว') o = { status: 'checked_out' };
+      else if (status === 'มาแล้ว' || status === 'เช็คอินแล้ว') o = { status: b.isShareable ? 'shareable' : 'occupied', approvedBy: staff || '', approvedAt: TS() };
+      else o = { status: 'pending', confirmDeadline: Date.now() + 9e5 };
+      await db.collection('bookings').doc(id).update(o);
+      logIt({ userName: staff || 'System', action: 'BOOKING_STATUS_CHANGE', status: 'SUCCESS', details: b.roomName + ' ' + b.date + ' ' + b.startTime + ' → ' + status });
+      return { success: true };
+    },
+    async saveBooking(fd) {
+      await ensure(); const ids = idsOf(fd.studentIDs), h = hours(fd.bookingDate), en = fd.endTime || String(h.close).padStart(2, '0') + ':00';
+      if (BK.some(b => b.roomName === fd.roomName && b.date === fd.bookingDate && b.status !== 'cancelled' && b.status !== 'checked_out' && fd.startTime < b.endTime && en > b.startTime)) return { success: false, message: 'ช่วงเวลานี้ถูกจองแล้ว' };
+      const code = 'W' + Date.now().toString(36).slice(-5).toUpperCase();
+      const dl = Math.max(Date.now(), new Date(fd.bookingDate + 'T' + fd.startTime + ':00').getTime()) + 9e5;
+      await db.collection('bookings').add({ roomId: roomIdOf(fd.roomName), roomName: fd.roomName, date: fd.bookingDate, startTime: fd.startTime, endTime: en, bookerName: clean(fd.userName) || 'เคาน์เตอร์', bookerEmail: fd.userEmail || (ids[0] ? ids[0] + '@student.chula.ac.th' : ''), isShareable: false, roomTitle: '', status: 'pending', confirmDeadline: dl, studentIds: ids, studentDetails: details(ids, fd.startTime, en), accessories: fd.accessories || '', accStaff: (fd.accessories || '').trim() ? (fd.staffName || '') : '', ignoreLateCancel: !!fd.ignoreLateCancel, source: 'admin', createdBy: fd.staffName || 'Admin', code, createdAt: TS() });
+      logIt({ userName: fd.staffName || 'Admin', action: 'BOOKING_CREATE', status: 'SUCCESS', details: fd.roomName + ' ' + fd.bookingDate + ' ' + fd.startTime + '-' + en });
+      return { success: true, code };
+    },
+    async updateFullBooking(row, fd) {
+      await ensure(); const id = revMap[row]; if (!id) return { success: false, message: 'ไม่พบรายการจอง' };
+      const ids = idsOf(fd.studentIDs), o = { bookerName: clean(fd.userName) || 'เคาน์เตอร์', studentIds: ids, bookerEmail: fd.userEmail || '', roomName: fd.roomName, roomId: roomIdOf(fd.roomName), date: fd.bookingDate, startTime: fd.startTime, endTime: fd.endTime, studentDetails: details(ids, fd.startTime, fd.endTime) };
+      if (fd.accessories !== undefined) { o.accessories = fd.accessories; o.accStaff = (fd.accessories || '').trim() ? (fd.staffName || '') : ''; }
+      if (fd.ignoreLateCancel !== undefined) o.ignoreLateCancel = !!fd.ignoreLateCancel;
+      await db.collection('bookings').doc(id).update(o);
+      logIt({ userName: o.bookerName, action: 'BOOKING_EDIT', status: 'SUCCESS', details: o.roomName + ' ' + o.date });
+      return { success: true };
+    },
+    async getAllStats(staff, y, m, date) {
+      await ensure(); const ref = date ? new Date(date) : new Date(), Y = ref.getFullYear(), M = ref.getMonth(), D = ref.getDate();
+      const f = staff && staff !== 'all' && SET.staffs.includes(staff) ? staff : null;
+      const cm = Array(12).fill(0), wm = Array(12).fill(0), acc = {}; let t = 0, mo = 0, yr = 0, aT = 0, aY = 0;
+      BK.filter(b => b.status !== 'cancelled' && b.date).forEach(b => {
+        const [by, bm, bd] = b.date.split('-').map(Number); if (by !== Y) return;
+        const isAdm = b.source === 'admin'; (isAdm ? ((!f || b.createdBy === f) && cm[bm - 1]++) : wm[bm - 1]++);
+        if (!isAdm || !f || b.createdBy === f) { yr++; if (bm - 1 === M) { mo++; if (bd === D) t++; } }
+        (b.accessories || '').split(',').map(x => x.trim()).filter(Boolean).forEach(n => { aY++; if (bm - 1 === M) { aT++; acc[n] = (acc[n] || 0) + 1; } });
+      });
+      const TM = ['', 'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+      return { booking: { todayCount: t, monthCount: mo, yearCount: yr, counterMonthCounts: cm, label: TM[M + 1] + ' ' + Y, monthLabel: TM[M + 1] }, accessories: { stats: acc, total: aT, yearTotal: aY }, webBookings: { monthCounts: wm }, history: [] };
+    }
+  };
+  const run = (sh, fh) => new Proxy({}, { get: (_, n) => n === 'withSuccessHandler' ? f => run(f, fh) : n === 'withFailureHandler' ? f => run(sh, f) : (...a) => {
+    Promise.resolve().then(() => FN[n] ? FN[n](...a) : Promise.reject(new Error('ไม่รองรับฟังก์ชัน ' + n))).then(r => { sh && sh(r); }, e => { fh ? fh(e) : console.error(e); });
+  } });
+  window.google = { script: { run: run(null, null), host: { close() { } } } };
+  window.__FB = { FN, db, get BK() { return BK; }, DEMO };
+
+  // ===== แผง "งานรอดำเนินการ" (ฟีเจอร์ใหม่: รอยืนยันจากเว็บ + คำขอยกเลิกจากนิสิต) =====
+  let baseTitle = '';
+  function renderPanel() {
+    const host = document.getElementById('schedule'); if (!host) return;
+    let p = document.getElementById('fbPanel');
+    if (!p) { p = document.createElement('div'); p.id = 'fbPanel'; p.style.marginBottom = '12px'; host.insertBefore(p, host.firstChild); }
+    if (!baseTitle) baseTitle = document.title || 'ระบบจัดการห้อง · ห้องสมุดวิศวะ';
+    const live = BK.filter(b => b.status !== 'cancelled' && b.status !== 'checked_out');
+    const pend = live.filter(b => b.status === 'pending' && b.source !== 'admin');
+    const cr = live.filter(b => b.cancelRequest && b.cancelRequest.status === 'requested');
+    const n = pend.length + cr.length; document.title = (n ? '(' + n + ') ' : '') + baseTitle;
+    if (!n) { p.innerHTML = ''; return; }
+    const row = b => esc(b.roomName) + ' · ' + b.date + ' ' + b.startTime + '-' + b.endTime + '<br><span style="opacity:.75">' + esc(b.bookerName) + (b.roomTitle ? ' · 🏷️' + esc(b.roomTitle) : '') + (b.isShareable ? ' · 🤝' + (b.studentIds || []).length + '/12 คน' : '') + '</span>';
+    const btn = (c, t, fn, id) => '<button onclick="__FBX.' + fn + '(\'' + id + '\')" class="btn btn-sm ' + c + '" style="margin-right:4px">' + t + '</button>';
+    p.innerHTML = '<div class="card p-3" style="background:var(--bg-card);color:var(--text-main);border:1px solid #f59e0b">' +
+      (pend.length ? '<b>🟡 รอยืนยัน (จองผ่านเว็บ) ' + pend.length + ' รายการ</b>' + pend.map(b => '<div style="padding:6px 0;border-bottom:1px solid var(--border-light,#ddd);font-size:.85rem">' + row(b) + '<div style="margin-top:4px">' + btn('btn-success', '✅ ยืนยัน (เช็คอิน)', 'ok', b.id) + btn('btn-outline-danger', 'ยกเลิก', 'no', b.id) + '</div></div>').join('') : '') +
+      (cr.length ? '<b style="display:block;margin-top:8px">🚫 คำขอยกเลิกจากนิสิต ' + cr.length + ' รายการ</b>' + cr.map(b => '<div style="padding:6px 0;border-bottom:1px solid var(--border-light,#ddd);font-size:.85rem">' + row(b) + '<div style="margin-top:4px">' + btn('btn-danger', 'อนุมัติยกเลิก', 'cok', b.id) + btn('btn-secondary', 'ไม่อนุมัติ', 'cno', b.id) + '</div></div>').join('') : '') + '</div>';
+  }
+  const who = () => (typeof currentUser !== 'undefined' && currentUser && currentUser.displayName) || 'Admin';
+  window.__FBX = {
+    ok: id => FN.updateBookingStatus(rid(id), 'มาแล้ว', who()),
+    no: id => FN.updateBookingStatus(rid(id), 'ยกเลิกแล้ว', who()),
+    cok: id => db.collection('bookings').doc(id).update({ status: 'cancelled', cancelReason: 'นิสิตขอยกเลิก (แอดมินอนุมัติ)' }),
+    cno: id => { const b = BK.find(x => x.id === id); return db.collection('bookings').doc(id).update({ cancelRequest: { ...b.cancelRequest, status: 'rejected' } }); }
+  };
+  if (DEMO) document.addEventListener('DOMContentLoaded', () => { const d = document.createElement('div'); d.style.cssText = 'position:fixed;bottom:0;left:0;right:0;background:#fde047;color:#713f12;text-align:center;font-size:12px;padding:4px;z-index:99999'; d.textContent = '🧪 โหมดทดลอง (เชื่อม Firebase ไม่ได้) ล็อกอินด้วยรหัสผ่านทดลอง demo1234 ข้อมูลไม่ถูกบันทึกถาวร'; document.body.appendChild(d); });
+})();
+</script>
 </head>
 
 <body>
@@ -2689,7 +2882,7 @@
             currentUser = res; settingsLoaded = false;
             try { sessionStorage.setItem('adminUser', JSON.stringify(res)); } catch (e) { }
             if (rememberMe) {
-              try { localStorage.setItem('savedCredentials', JSON.stringify({ user: inputUser, pass: inputPass })); } catch (e) { }
+              try { localStorage.setItem('savedCredentials', JSON.stringify({ user: inputUser, pass: '' })); } catch (e) { }
             } else {
               try { localStorage.removeItem('savedCredentials'); } catch (e) { }
             }
@@ -2738,7 +2931,7 @@
     function logout() {
       try {
         recordClientAccessLog('LOGOUT', { user: currentUser ? currentUser.displayName : 'Unknown' });
-        sessionStorage.removeItem('adminUser');
+        sessionStorage.removeItem('adminUser'); window.fbSignOut && window.fbSignOut();
       } catch (e) { }
       document.getElementById('adminContent').style.display = 'none';
       document.getElementById('loginScreen').style.display = 'flex';
