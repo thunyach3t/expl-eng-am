@@ -90,7 +90,7 @@
       return { collection: k => { C[k] = C[k] || {}; return {
         onSnapshot: f => { (S[k] = S[k] || []).push(f); setTimeout(() => f(snap(k))); },
         add: async d => { const id = 'm' + (++n); C[k][id] = d; emit(k); return { id }; },
-        doc: id => ({ update: async o => { if (C[k][id]) Object.assign(C[k][id], o); emit(k); }, delete: async () => { delete C[k][id]; emit(k); } })
+        doc: id => ({ get: async () => ({ exists: !!C[k][id], data: () => C[k][id] }), set: async o => { C[k][id] = o; emit(k); }, update: async o => { if (C[k][id]) Object.assign(C[k][id], o); emit(k); }, delete: async () => { delete C[k][id]; emit(k); } })
       }; } };
     }
     var db = null, DEMO_MODE = false;
@@ -441,6 +441,7 @@
       ...['A', 'B', 'C', 'D', 'E', 'F'].map(l => ({ id: `box_${l}`, name: `The Box ${l}`, category: 'The Box' }))
     ];
 
+    const ALL_ROOMS_ALL = ALL_ROOMS.slice();
     let currentUser = null;
     let selectedDateStr = formatDateISO(new Date());
     let selectedRoom = null;
@@ -561,7 +562,7 @@
           const duration = endM - startM;
 
           const weekend = isWeekendString(data.date);
-          const minOpeningMins = weekend ? 9 * 60 : 8 * 60;
+        const minOpeningMins = Math.min(weekend ? 9 * 60 : 8 * 60, getDayHours(data.date).open * 60);
 
           if (duration > 240 || (data.startTime === "00:00" && data.endTime === "23:59") || startM < minOpeningMins) {
             db.collection("bookings").doc(doc.id).delete();
@@ -648,21 +649,51 @@
       return conflict;
     }
 
+    // ===== ค่าตั้งค่าจากหน้าแอดมิน (เวลาเปิด-ปิด วันหยุด ห้องปิด/ซ่อน ประกาศ) =====
+    var SETTINGS = null;
+    function getDayHours(dateStr) {
+      const d = new Date(dateStr + 'T00:00:00').getDay(), k = d === 0 ? 'sun' : d === 6 ? 'sat' : 'wd', S = SETTINGS || {};
+      const def = { wd: [8, 19], sat: [9, 17], sun: [9, 17] }[k];
+      return { open: parseInt(S['open_' + k], 10) || def[0], close: parseInt(S['close_' + k], 10) || def[1], closed: S['closed_' + k] === true };
+    }
+    function isRoomClosed(roomId) {
+      const r = ALL_ROOMS_ALL.find(x => x.id === roomId);
+      return !!(r && SETTINGS && SETTINGS.roomStatus && SETTINGS.roomStatus[r.name] === false);
+    }
+    function applyAnnouncement() {
+      const icon = document.querySelector('.fa-bullhorn'), box = icon && icon.parentElement;
+      if (!box || !SETTINGS || !SETTINGS.announcement) return;
+      let t = box.querySelector('[data-ann]') || [...box.children].find(c => c !== icon && c.textContent.trim().length > 3);
+      if (t) { t.setAttribute('data-ann', '1'); t.textContent = SETTINGS.announcement; }
+    }
+    async function loadSiteSettings() {
+      try {
+        const d = await db.collection('settings').doc('main').get();
+        if (d.exists) SETTINGS = JSON.parse(d.data().json);
+      } catch (e) { return; }
+      const hid = (SETTINGS && SETTINGS.roomHidden) || {};
+      ALL_ROOMS.length = 0; ALL_ROOMS_ALL.filter(r => hid[r.name] !== true).forEach(r => ALL_ROOMS.push(r));
+      applyAnnouncement();
+      try { renderAllOverviewGrids(); } catch (e) { }
+    }
+
     function getLibraryStatusInfo() {
       const now = new Date();
       const todayStr = formatDateISO(now);
       const isToday = selectedDateStr === todayStr;
 
       const isWeekend = isWeekendString(selectedDateStr);
-      const openingHour = isWeekend ? 9 : 8; 
-      const closingHour = isWeekend ? 17 : 19;
+      const H = getDayHours(selectedDateStr);
+      const openingHour = H.open;
+      const closingHour = H.close;
 
       const currentMins = now.getHours() * 60 + now.getMinutes();
       const openingMins = openingHour * 60;
       const closingMins = closingHour * 60;
 
-      let isClosed = false;
-      let statusText = isWeekend ? 'เสาร์-อาทิตย์ (เปิด 09:00 - 17:00 น.)' : 'จันทร์-ศุกร์ (เปิด 08:00 - 19:00 น.)';
+      let isClosed = H.closed;
+      let statusText = (isWeekend ? 'เสาร์-อาทิตย์' : 'จันทร์-ศุกร์') + ` (เปิด ${String(openingHour).padStart(2, '0')}:00 - ${String(closingHour).padStart(2, '0')}:00 น.)`;
+      if (H.closed) statusText = '🔴 ห้องสมุดปิดทำการในวันนี้';
 
       if (isToday) {
         if (currentMins < openingMins || currentMins >= closingMins) {
@@ -969,6 +1000,7 @@
     }
 
     function getRoomCurrentRealtimeStatus(roomId, dateStr) {
+      if (isRoomClosed(roomId)) return 'ห้องปิด';
       const roomBookings = realTimeBookings.filter(b => b.roomId === roomId && b.date === dateStr);
       if (!roomBookings || roomBookings.length === 0) return 'ว่าง';
 
@@ -1021,8 +1053,9 @@
 
     // ช่องเวลาแรกสุดที่ห้องนี้ยังจองได้ (ช่องละ 15 นาที)
     function getRoomNextFree(roomId, dateStr) {
-      const wk = isWeekendString(dateStr);
-      const open = (wk ? 9 : 8) * 60, close = (wk ? 17 : 19) * 60;
+      const H = getDayHours(dateStr);
+      if (H.closed) return { state: 'closed' };
+      const open = H.open * 60, close = H.close * 60;
       const now = new Date();
       let from = open;
       if (dateStr === formatDateISO(now)) {
@@ -1208,7 +1241,7 @@
 
       const libInfo = getLibraryStatusInfo();
       const startHour = libInfo.openingHour;
-      const closingTimeStr = libInfo.closingHour === 17 ? "17:00" : "19:00";
+      const closingTimeStr = String(libInfo.closingHour).padStart(2, '0') + ':00';
 
       const now = new Date();
       const isToday = selectedDateStr === formatDateISO(now);
@@ -1257,6 +1290,8 @@
     }
 
     function selectTimeSlotForBooking(startTime) {
+      if (selectedRoom && isRoomClosed(selectedRoom.id)) { alert('🔴 ห้องนี้ปิดให้บริการชั่วคราว'); return; }
+      if (getDayHours(selectedDateStr).closed) { alert('🔴 ห้องสมุดปิดทำการในวันนี้'); return; }
       selectedStartTime = startTime;
 
       if (!currentUser) { 
@@ -1319,8 +1354,7 @@
       const selectEnd = document.getElementById('endTimeSelect');
       selectEnd.innerHTML = '';
       const startMins = timeToMins(startTime);
-      const isWeekend = isWeekendString(selectedDateStr);
-      const closingMins = isWeekend ? 17 * 60 : 19 * 60;
+      const closingMins = getDayHours(selectedDateStr).close * 60;
       
       const stdId = currentUser ? currentUser.studentId : null;
       const usedMins = getUserTotalBookedMinutesOnDate(stdId, selectedDateStr);
@@ -1711,8 +1745,10 @@
     }
 
     function quickBook(roomId, time) {
+      if (isRoomClosed(roomId)) { alert('🔴 ห้องนี้ปิดให้บริการชั่วคราว'); return; }
+      if (getDayHours(selectedDateStr).closed) { alert('🔴 ห้องสมุดปิดทำการในวันนี้'); return; }
       const room = ALL_ROOMS.find(r => r.id === roomId);
-      const s = timeToMins(time), close = (isWeekendString(selectedDateStr) ? 17 : 19) * 60;
+      const s = timeToMins(time), close = getDayHours(selectedDateStr).close * 60;
       const used = currentUser && !currentUser.isAdmin ? getUserTotalBookedMinutesOnDate(currentUser.studentId, selectedDateStr) : 0;
       if (used >= 120) {
         document.getElementById('modalContent').innerHTML = `<h3 class="font-bold text-chula-main text-base mb-2">⏱ โควตาเต็มแล้ว</h3><p class="text-sm whitespace-pre-line mb-4">${QUOTA_MSG}</p>${LINE_OA_URL ? `<a href="${LINE_OA_URL}" target="_blank" rel="noopener" class="block text-center py-2 mb-2 rounded-lg bg-green-500 text-white font-bold text-sm">💬 ทักไลน์ OA</a>` : ''}<button onclick="closeModal()" class="w-full py-2 bg-gray-200 text-gray-700 rounded-lg text-sm">ปิด</button>`;
@@ -1744,7 +1780,8 @@
     }
 
     function renderLiveGrid() {
-      const open = (isWeekendString(selectedDateStr) ? 9 : 8) * 60, close = (isWeekendString(selectedDateStr) ? 17 : 19) * 60;
+      const H = getDayHours(selectedDateStr), open = H.open * 60, close = H.close * 60;
+      if (H.closed) { document.getElementById('liveGrid').innerHTML = '<tr><td class="p-4 text-sm text-gray-500">🔴 ห้องสมุดปิดทำการในวันนี้</td></tr>'; return; }
       const now = new Date(), isToday = selectedDateStr === formatDateISO(now), cur = now.getHours() * 60 + now.getMinutes();
       const sticky = 'sticky left-0 z-10 bg-white dark:bg-chula-darkCard';
       let h = `<tr><th class="${sticky}"></th>`;
@@ -1758,7 +1795,7 @@
           const b = getBookingAt(r.id, m), t = minsToTime(m);
           let cls, act = '', tip = t;
           if (b) { cls = (b.status === 'pending' ? 'bg-amber-400' : b.isShareable ? 'bg-pink-400' : 'bg-red-500') + ' cursor-pointer'; act = `openRoomQueue('${r.id}')`; tip = (b.roomTitle ? b.roomTitle + ' · ' : '') + b.startTime + '-' + b.endTime; }
-          else if (isToday && m <= cur) cls = 'bg-gray-200 dark:bg-gray-700';
+          else if ((isToday && m <= cur) || isRoomClosed(r.id)) cls = 'bg-gray-200 dark:bg-gray-700';
           else { cls = 'bg-emerald-400 hover:bg-emerald-500 cursor-pointer'; act = `quickBook('${r.id}','${t}')`; tip = 'จองเริ่ม ' + t; }
           h += `<td ${act ? `onclick="${act}"` : ''} title="${escapeHtml(tip)}" class="h-9 min-w-[26px] rounded-md bg-clip-padding ${m % 60 === 0 ? 'border-l-[3px] border-transparent' : ''} ${cls}"></td>`;
         }
@@ -1846,6 +1883,8 @@
       Object.keys(_prev).forEach(id => { if (!cur[id] && cancelledMine[id]) alert(`🚫 ${_prev[id].roomName} ${_prev[id].startTime}-${_prev[id].endTime} ถูกยกเลิก: ${cancelledMine[id].cancelReason || ''}`); });
       _prev = cur;
     }
+
+    loadSiteSettings(); setInterval(loadSiteSettings, 60000);
 
     // ===== 📣 แจ้งปัญหา / ส่งความคิดเห็น =====
     let _lastReport = 0;
