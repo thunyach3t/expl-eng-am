@@ -355,7 +355,7 @@
             class="w-full p-2.5 border rounded-lg bg-white dark:bg-gray-800 dark:border-gray-700 dark:text-white outline-none text-sm">
         </div>
 
-        <div>
+        <div id="usageTypeWrap">
           <h4 class="font-bold border-b pb-2 mb-3 text-sm">รูปแบบการใช้งานห้อง</h4>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <label class="p-3 border rounded-xl flex items-start space-x-3 cursor-pointer hover:border-chula-main transition">
@@ -391,8 +391,8 @@
         </div>
 
         <div>
-          <h4 class="font-bold border-b pb-2 mb-3 text-sm">กรอกรหัสนิสิต (สูงสุด 12 คน)</h4>
-          <p class="text-[11px] text-gray-500 mb-2">ห้องส่วนตัวต้องกรอกอย่างน้อย 4 คน · ห้องแชร์จองคนเดียวได้ แต่ต้องมีสมาชิกครบ 4 คนภายใน 15 นาทีแรกของเวลาจอง</p>
+          <h4 id="studentHeading" class="font-bold border-b pb-2 mb-3 text-sm">กรอกรหัสนิสิต (สูงสุด 12 คน)</h4>
+          <p id="studentHint" class="text-[11px] text-gray-500 mb-2">ห้องส่วนตัวต้องกรอกอย่างน้อย 4 คน · ห้องแชร์จองคนเดียวได้ แต่ต้องมีสมาชิกครบ 4 คนภายใน 15 นาทีแรกของเวลาจอง</p>
           <div id="studentInputsContainer" class="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div><label class="block text-xs text-gray-500 mb-1">คนแรก (ผู้จอง - Auto Fill) <span class="text-red-500">*</span></label><input type="text" id="studentId1" readonly class="w-full p-2.5 bg-gray-100 dark:bg-gray-800 dark:border-gray-700 text-gray-500 dark:text-gray-400 border rounded-lg font-semibold text-sm cursor-not-allowed"></div>
             <div id="wrap_std2"><label class="block text-xs text-gray-500 mb-1">คนที่ 2 <span id="star_std2" class="text-red-500 hidden">*</span></label><input type="text" id="studentId2" maxlength="10" placeholder="66-69xxxx21" class="w-full p-2.5 border rounded-lg bg-white dark:bg-gray-800 dark:border-gray-700 dark:text-white text-sm"></div>
@@ -1299,6 +1299,12 @@
         starStd4.classList.remove('hidden');
       }
 
+      const isBox = selectedRoom.category === 'The Box';
+      document.getElementById('usageTypeWrap').classList.toggle('hidden', isBox);
+      if (isBox) document.querySelector('input[name="roomUsageType"][value="private"]').checked = true;
+      toggleRoomTitleField();
+      document.getElementById('studentHeading').innerText = isBox ? 'กรอกรหัสนิสิต (The Box จองได้ 1 คน)' : 'กรอกรหัสนิสิต (สูงสุด 12 คน)';
+      document.getElementById('studentHint').innerText = isBox ? 'The Box ใช้งานได้คนเดียว และไม่สามารถแชร์ห้องได้' : 'ห้องส่วนตัวต้องกรอกอย่างน้อย 4 คน · ห้องแชร์จองคนเดียวได้ แต่ต้องมีสมาชิกครบ 4 คนภายใน 15 นาทีแรกของเวลาจอง';
       for (let i = 2; i <= 12; i++) { const f = document.getElementById('studentId' + i); if (f) f.value = ''; }
       for (let i = 7; i <= 12; i++) {
         const w = document.getElementById('wrap_std' + i);
@@ -1352,7 +1358,7 @@
       if (!currentUser) { openLoginModal(); return; }
 
       const usageType = document.querySelector('input[name="roomUsageType"]:checked').value;
-      const isShareable = (usageType === 'shareable');
+      const isShareable = (usageType === 'shareable') && selectedRoom.category !== 'The Box';
       const endTime = document.getElementById('endTimeSelect').value;
 
       const requestedMins = timeToMins(endTime) - timeToMins(selectedStartTime);
