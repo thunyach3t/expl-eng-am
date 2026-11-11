@@ -1486,7 +1486,7 @@
   const rid = id => idMap[id] || (idMap[id] = ++seq, revMap[seq] = id, seq);
   const PJ = v => typeof v === 'string' ? JSON.parse(v || '{}') : (v || {});
   const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  const roomIdOf = n => { let m; if ((m = /^Study Room (\d+)/.exec(n))) return 'study_' + m[1]; if ((m = /^Seminar Room (\w)/.exec(n))) return 'sem_' + m[1].toLowerCase(); if ((m = /^The Box (\w)/.exec(n))) return 'box_' + m[1].toLowerCase(); return String(n).replace(/\s+/g, '_').toLowerCase(); };
+  const roomIdOf = n => { let m; if ((m = /^Study Room (\d+)/.exec(n))) return 'study_' + m[1]; if ((m = /^Seminar Room (\w)/.exec(n))) return 'sem_' + m[1].toLowerCase(); if ((m = /^The Box (\w)/.exec(n))) return 'box_' + m[1].toUpperCase(); return String(n).replace(/\s+/g, '_').toLowerCase(); };
   const stOf = b => b.status === 'pending' ? 'รอเช็คอิน' : b.status === 'checked_out' ? 'เช็คเอาต์แล้ว' : b.status === 'cancelled' ? 'ยกเลิกแล้ว' : 'มาแล้ว';
   const label = b => (b.bookerName || '-') + (b.roomTitle ? ' 🏷️' + b.roomTitle : '') + (b.isShareable ? ' 🤝' + (b.studentIds || []).length + '/12' : '') + (b.cancelRequest && b.cancelRequest.status === 'requested' ? ' 🚫ขอยกเลิก' : '');
   const clean = s => String(s || '').replace(/\s*(🏷️|🤝|🚫).*$/u, '').trim();
@@ -1539,7 +1539,7 @@
       let on = false; const code = b.code || ('B' + b.id.slice(-5).toUpperCase());
       times.forEach(t => {
         if (t === b.startTime) on = true; if (t === b.endTime) on = false;
-        if (on) td[b.roomName][t] = { status: 'busy', name: label(b), studentIds: (b.studentIds || []).join(', '), email: b.bookerEmail || '', checkin: stOf(b), code, accessories: b.accessories || '', rowIdx: rid(b.id), source: b.source === 'admin' ? 'admin' : 'web', ignoreLateCancel: !!b.ignoreLateCancel, accStaff: b.accStaff || '' };
+        if (on) td[b.roomName][t] = { status: 'busy', name: label(b), studentIds: (b.studentIds || []).join(', '), email: b.bookerEmail || '', checkin: stOf(b), code, accessories: b.accessories || '', rowIdx: rid(b.id), source: b.source === 'admin' ? 'admin' : 'web', shareable: !!b.isShareable, ignoreLateCancel: !!b.ignoreLateCancel, accStaff: b.accStaff || '' };
       });
     });
     return { ...base, timeSlots: times, tableData: td };
@@ -1589,7 +1589,8 @@
       if (BK.some(b => b.roomName === fd.roomName && b.date === fd.bookingDate && b.status !== 'cancelled' && b.status !== 'checked_out' && fd.startTime < b.endTime && en > b.startTime)) return { success: false, message: 'ช่วงเวลานี้ถูกจองแล้ว' };
       const code = 'W' + Date.now().toString(36).slice(-5).toUpperCase();
       const dl = Math.max(Date.now(), new Date(fd.bookingDate + 'T' + fd.startTime + ':00').getTime()) + 9e5;
-      await db.collection('bookings').add({ roomId: roomIdOf(fd.roomName), roomName: fd.roomName, date: fd.bookingDate, startTime: fd.startTime, endTime: en, bookerName: clean(fd.userName) || 'เคาน์เตอร์', bookerEmail: fd.userEmail || (ids[0] ? ids[0] + '@student.chula.ac.th' : ''), isShareable: false, roomTitle: '', status: 'pending', confirmDeadline: dl, studentIds: ids, studentDetails: details(ids, fd.startTime, en), accessories: fd.accessories || '', accStaff: (fd.accessories || '').trim() ? (fd.staffName || '') : '', ignoreLateCancel: !!fd.ignoreLateCancel, source: 'admin', createdBy: fd.staffName || 'Admin', code, createdAt: TS() });
+      const soon = new Date(fd.bookingDate + 'T' + fd.startTime + ':00').getTime() - Date.now() <= 9e5; // walk-in ที่เคาน์เตอร์ = นิสิตมาแล้ว ยืนยันทันที
+      await db.collection('bookings').add({ roomId: roomIdOf(fd.roomName), roomName: fd.roomName, date: fd.bookingDate, startTime: fd.startTime, endTime: en, bookerName: clean(fd.userName) || 'เคาน์เตอร์', bookerEmail: fd.userEmail || (ids[0] ? ids[0] + '@student.chula.ac.th' : ''), isShareable: false, roomTitle: '', status: soon ? 'occupied' : 'pending', confirmDeadline: dl, studentIds: ids, studentDetails: details(ids, fd.startTime, en), accessories: fd.accessories || '', accStaff: (fd.accessories || '').trim() ? (fd.staffName || '') : '', ignoreLateCancel: !!fd.ignoreLateCancel, source: 'admin', createdBy: fd.staffName || 'Admin', code, createdAt: TS() });
       logIt({ userName: fd.staffName || 'Admin', action: 'BOOKING_CREATE', status: 'SUCCESS', details: fd.roomName + ' ' + fd.bookingDate + ' ' + fd.startTime + '-' + en });
       return { success: true, code };
     },
@@ -1630,7 +1631,7 @@
     if (!p) { p = document.createElement('div'); p.id = 'fbPanel'; p.style.marginBottom = '12px'; host.insertBefore(p, host.firstChild); }
     if (!baseTitle) baseTitle = document.title || 'ระบบจัดการห้อง · ห้องสมุดวิศวะ';
     const live = BK.filter(b => b.status !== 'cancelled' && b.status !== 'checked_out');
-    const pend = live.filter(b => b.status === 'pending' && b.source !== 'admin');
+    const pend = []; // รอยืนยัน = แถบสีเหลืองในตาราง ไม่แจ้งเตือน
     const cr = live.filter(b => b.cancelRequest && b.cancelRequest.status === 'requested');
     const n = pend.length + cr.length; document.title = (n ? '(' + n + ') ' : '') + baseTitle;
     if (!n) { p.innerHTML = ''; return; }
@@ -4914,6 +4915,78 @@
       </div>
     </div>
   </div>
+
+<script>
+(function () {
+  const css = `
+  #admin-pills-tab{display:none!important}
+  #adminTableBody td:not(.cell-booked):not(.cell-past):not(.room-col):not(.fbk-gtd){background:rgba(52,211,153,.22)}
+  tr.fbk-group td{background:var(--bg-card)!important;border-top:3px solid var(--text-main)!important;border-bottom:1px solid var(--border-color)!important;padding:0!important}
+  .fbk-gh{position:sticky;left:10px;display:inline-block;font-weight:700;font-size:1.05rem;padding:8px 6px;color:var(--text-main)}
+  .fbk-gh small{font-weight:400;opacity:.7;margin-left:8px}
+  .fbk-pending .cell-booked-inner{background:#fbbf24!important;border:2px solid #d97706!important}
+  .fbk-occupied .cell-booked-inner{background:#ef4444!important}
+  .fbk-shareable .cell-booked-inner{background:#f472b6!important}
+  .fbk-pending .booker-name,.fbk-pending .booker-name *{color:#451a03!important}
+  .fbk-occupied .booker-name,.fbk-shareable .booker-name{color:#fff!important}
+  .fbk-tag{font-size:.7em;background:#451a03;color:#fde68a;border-radius:4px;padding:1px 4px}
+  table.fbk-fit{table-layout:fixed!important;width:100%!important;min-width:0!important}
+  table.fbk-fit th,table.fbk-fit td{min-width:0!important;width:auto!important;padding-left:1px!important;padding-right:1px!important}
+  table.fbk-fit th.room-col,table.fbk-fit td.room-col{width:118px!important}
+  table.fbk-fit th.fbk-minor{font-size:0!important}
+  table.fbk-fit .booker-name{font-size:.72rem}
+  #fbkBar{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;margin:0 0 8px;font-size:.8rem;color:var(--text-main)}
+  #fbkBar i{display:inline-block;width:13px;height:13px;border-radius:3px;vertical-align:middle;margin-right:4px}`;
+  const st = document.createElement('style'); st.textContent = css; document.head.appendChild(st);
+  const sc = document.getElementById('scheduleContent'); if (!sc) return;
+  const bar = document.createElement('div'); bar.id = 'fbkBar';
+  bar.innerHTML = `<span><i style="background:#6ee7b7"></i>ว่าง</span><span><i style="background:#fbbf24"></i>รอยืนยัน (ให้นิสิตยื่นบัตร แล้วกดที่แถบเพื่อยืนยัน)</span><span><i style="background:#ef4444"></i>ไม่ว่าง (ยืนยันแล้ว)</span><span><i style="background:#f472b6"></i>ห้องแชร์</span><span><b>★</b> Walk-in หน้าเคาน์เตอร์</span><span>🌐 จองออนไลน์</span>
+    <span style="flex:1"></span><button type="button" class="btn btn-sm btn-outline-secondary" id="fbkL">◀</button><button type="button" class="btn btn-sm btn-outline-secondary" id="fbkNow">⏱ ตอนนี้</button><button type="button" class="btn btn-sm btn-outline-secondary" id="fbkR">▶</button><button type="button" class="btn btn-sm btn-outline-primary" id="fbkFit"></button>`;
+  sc.parentNode.insertBefore(bar, sc);
+  let fit = window.innerWidth >= 900, lastDate = '';
+  const tbl = () => document.getElementById('adminTableHead').closest('table');
+  function applyFit() {
+    tbl().classList.toggle('fbk-fit', fit);
+    document.getElementById('fbkFit').textContent = fit ? '↔ ขยายตาราง' : '⇤ ย่อให้พอดีจอ';
+    ['fbkL', 'fbkNow', 'fbkR'].forEach(id => document.getElementById(id).style.display = fit ? 'none' : '');
+  }
+  function toNow() {
+    const now = new Date(), m = Math.floor((now.getHours() * 60 + now.getMinutes()) / 15) * 15, t = String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+    const th = [...document.querySelectorAll('#adminTableHead th')].find(x => x.textContent.trim() === t);
+    sc.scrollTo({ left: th ? Math.max(0, th.offsetLeft - 200) : 0, behavior: 'smooth' });
+  }
+  document.getElementById('fbkFit').onclick = () => { fit = !fit; applyFit(); if (!fit) toNow(); };
+  document.getElementById('fbkNow').onclick = toNow;
+  document.getElementById('fbkL').onclick = () => sc.scrollBy({ left: -420, behavior: 'smooth' });
+  document.getElementById('fbkR').onclick = () => sc.scrollBy({ left: 420, behavior: 'smooth' });
+  const _sw = window.switchTab, ICON = { 'Seminar': '🏛️', 'Study Room': '📚', 'The Box': '📦' };
+  window.switchTab = function () {
+    if (!gData || !gData.groups) return _sw.apply(this, arguments);
+    const order = (gData.roomConfig && gData.roomConfig.groupOrder) ? gData.roomConfig.groupOrder.filter(g => gData.groups[g]) : Object.keys(gData.groups);
+    const body = document.getElementById('adminTableBody'), cols = gData.timeSlots.length + 1; let html = '';
+    order.forEach(g => {
+      _sw(g);
+      const codes = new Set(); gData.groups[g].forEach(r => gData.timeSlots.forEach(t => { const c = gData.tableData[r] && gData.tableData[r][t]; if (c && c.status === 'busy') codes.add(c.code); }));
+      html += `<tr class="fbk-group"><td colspan="${cols}"><div class="fbk-gh">${ICON[g] || '🚪'} ${g}<small>${gData.groups[g].length} ห้อง · ${codes.size} คิว</small></div></td></tr>` + body.innerHTML;
+    });
+    body.innerHTML = html; currentTabName = order[0];
+    body.querySelectorAll('td.cell-booked[data-booking-code]').forEach(td => {
+      const s = gData.tableData[td.dataset.room] && gData.tableData[td.dataset.room][td.dataset.slot]; if (!s) return;
+      const pend = s.checkin === 'รอเช็คอิน', walk = s.source === 'admin';
+      td.classList.add(pend ? 'fbk-pending' : s.shareable ? 'fbk-shareable' : 'fbk-occupied');
+      const nm = td.querySelector('.booker-name');
+      if (nm) nm.insertAdjacentHTML('afterbegin', (walk ? '<b>★</b> ' : '🌐 ') + (pend ? '<span class="fbk-tag">รอยืนยัน</span> ' : ''));
+      td.title = (walk ? '★ Walk-in (หน้าเคาน์เตอร์)' : '🌐 จองออนไลน์') + (pend ? ' · รอยืนยัน: ให้นิสิตยื่นบัตร แล้วกดเพื่อยืนยัน' : '');
+    });
+    document.querySelectorAll('#adminTableHead th:not(.room-col)').forEach(th => th.classList.toggle('fbk-minor', !/:00$/.test(th.textContent.trim())));
+    applyFit();
+    const dv = document.getElementById('adminDate').value;
+    if (!fit && dv !== lastDate && dv === getLocalDateStr(new Date())) setTimeout(toNow, 50);
+    lastDate = dv;
+  };
+  applyFit();
+})();
+</script>
 </body>
 
 </html>
