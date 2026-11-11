@@ -4939,7 +4939,21 @@
   table.fbk-wide{table-layout:fixed!important;min-width:0!important}
   table.fbk-wide th:not(.room-col){width:var(--fbk-col,110px)!important;min-width:0!important}
   table.fbk-wide td:not(.room-col){min-width:0!important}
-  table.fbk-wide th.room-col,table.fbk-wide td.room-col{width:150px!important;min-width:150px!important}
+  table.fbk-wide th.room-col,table.fbk-wide td.room-col{width:var(--fbk-room,150px)!important;min-width:var(--fbk-room,150px)!important}
+  /* จัดชั้นการซ้อน: หัวตาราง > คอลัมน์ห้อง > เนื้อหา (แก้ชื่อห้องทับมุมหัวตาราง) */
+  .admin-table thead th{position:sticky!important;top:0;z-index:30!important}
+  .admin-table thead th.room-col{left:0;z-index:40!important;background:var(--text-main)!important;color:var(--bg-card)!important}
+  .admin-table tbody td.room-col{z-index:20!important}
+  .fbk-gh{z-index:15}
+  #scheduleContent{max-height:calc(100vh - 150px)!important;min-height:360px}
+  /* โหมดแถวกะทัดรัด: เห็นภาพรวมทั้งตารางโดยเลื่อนน้อยลง */
+  table.fbk-compact thead th{padding:4px 0 4px 4px!important;font-size:.85rem!important}
+  table.fbk-compact tbody tr:not(.fbk-group) td{height:32px!important;padding-top:0!important;padding-bottom:0!important}
+  table.fbk-compact td.room-col{font-size:.9rem!important}
+  table.fbk-compact .booker-name{font-size:.82rem!important;line-height:1.1}
+  table.fbk-compact .booker-name ~ div{display:none!important}
+  table.fbk-compact .fbk-gh{padding:1px 6px;font-size:.95rem}
+  table.fbk-compact thead th{height:30px!important}
   table.fbk-wide .booker-name{font-size:.95rem;font-weight:700}
   table.fbk-fit{table-layout:fixed!important;width:100%!important;min-width:0!important}
   table.fbk-fit th,table.fbk-fit td{min-width:0!important;width:auto!important;padding-left:1px!important;padding-right:1px!important}
@@ -4953,18 +4967,21 @@
   const sc = document.getElementById('scheduleContent');
   let col = 110; try { col = parseInt(localStorage.getItem('fbkCol'), 10) || 110; } catch (e) { }
   document.documentElement.style.setProperty('--fbk-col', col + 'px');
-  let fit = false, lastDate = '';
+  let fit = false, lastDate = '', compact = true;
+  try { compact = localStorage.getItem('fbkCompact') !== '0'; } catch (e) { }
   if (sc) {
     const bar = document.createElement('div'); bar.id = 'fbkBar';
     bar.innerHTML = `<span><i style="background:#34d399"></i>ว่าง</span><span><i style="background:#fbbf24"></i>รอยืนยัน (ให้นิสิตยื่นบัตร แล้วกดที่แถบเพื่อยืนยัน)</span><span><i style="background:#ef4444"></i>ไม่ว่าง (ยืนยันแล้ว)</span><span><i style="background:#f472b6"></i>ห้องแชร์</span><span><b>★</b> Walk-in หน้าเคาน์เตอร์</span><span>🌐 จองออนไลน์</span>
       <span style="flex:1"></span><label id="fbkWw" style="margin:0">ความกว้างช่อง <input type="range" id="fbkW" min="60" max="240" step="10" value="${col}"> <span id="fbkWv">${col}</span></label>
-      <button type="button" class="btn btn-sm btn-outline-secondary" id="fbkL">◀</button><button type="button" class="btn btn-sm btn-outline-secondary" id="fbkNow">⏱ ตอนนี้</button><button type="button" class="btn btn-sm btn-outline-secondary" id="fbkR">▶</button><button type="button" class="btn btn-sm btn-outline-primary" id="fbkFit"></button>`;
+      <button type="button" class="btn btn-sm btn-outline-secondary" id="fbkL">◀</button><button type="button" class="btn btn-sm btn-outline-secondary" id="fbkNow">⏱ ตอนนี้</button><button type="button" class="btn btn-sm btn-outline-secondary" id="fbkR">▶</button><button type="button" class="btn btn-sm btn-outline-secondary" id="fbkRows"></button><button type="button" class="btn btn-sm btn-outline-primary" id="fbkFit"></button>`;
     sc.parentNode.insertBefore(bar, sc);
     const tbl = () => document.getElementById('adminTableHead').closest('table');
     window.__fbkApply = function () {
       const t = tbl(); t.classList.toggle('fbk-fit', fit); t.classList.toggle('fbk-wide', !fit);
       const n = (typeof gData !== 'undefined' && gData && gData.timeSlots) ? gData.timeSlots.length : 45;
-      t.style.width = fit ? '100%' : (150 + n * col) + 'px';
+      const rw = compact ? 130 : 150; document.documentElement.style.setProperty('--fbk-room', rw + 'px');
+      t.classList.toggle('fbk-compact', compact); document.getElementById('fbkRows').textContent = compact ? '↕ แถวปกติ' : '↕ แถวกะทัดรัด';
+      t.style.width = fit ? '100%' : (rw + n * col) + 'px';
       document.getElementById('fbkFit').textContent = fit ? '↔ ขยายตาราง' : '⇤ ย่อให้พอดีจอ';
       ['fbkL', 'fbkNow', 'fbkR', 'fbkWw'].forEach(id => document.getElementById(id).style.display = fit ? 'none' : '');
     };
@@ -4975,6 +4992,7 @@
     };
     document.getElementById('fbkFit').onclick = () => { fit = !fit; __fbkApply(); if (!fit) toNow(); };
     document.getElementById('fbkNow').onclick = toNow;
+    document.getElementById('fbkRows').onclick = () => { compact = !compact; try { localStorage.setItem('fbkCompact', compact ? '1' : '0'); } catch (e) { } __fbkApply(); };
     document.getElementById('fbkL').onclick = () => sc.scrollBy({ left: -Math.max(400, col * 4), behavior: 'smooth' });
     document.getElementById('fbkR').onclick = () => sc.scrollBy({ left: Math.max(400, col * 4), behavior: 'smooth' });
     document.getElementById('fbkW').oninput = e => { col = +e.target.value; document.documentElement.style.setProperty('--fbk-col', col + 'px'); document.getElementById('fbkWv').textContent = col; try { localStorage.setItem('fbkCol', col); } catch (x) { } __fbkApply(); };
