@@ -1478,7 +1478,7 @@
   try { firebase.initializeApp(CFG); db = firebase.firestore(); auth = firebase.auth(); } catch (e) { }
   if (!db) { DEMO = true; db = memDb(); }
   const TS = () => DEMO ? Date.now() : firebase.firestore.FieldValue.serverTimestamp();
-  window.fbSignOut = () => { loggedIn = false; try { auth && auth.signOut(); } catch (e) { } };
+  window.fbSignOut = () => { loggedIn = false; try { localStorage.setItem('fbNoRestore', '1'); } catch (e) { } try { auth && auth.signOut(); } catch (e) { } };
 
   const ROOMS = { groups: { 'Seminar': { capacity: 12, rooms: ['Seminar Room A', 'Seminar Room B', 'Seminar Room C'] }, 'Study Room': { capacity: 12, rooms: [1, 2, 3, 4, 5, 6, 7].map(i => 'Study Room ' + i) }, 'The Box': { capacity: 1, rooms: 'ABCDEF'.split('').map(l => 'The Box ' + l) } } };
   const defSet = () => ({ open: 8, close: 19, open_wd: 8, close_wd: 19, open_sat: 9, close_sat: 17, open_sun: 9, close_sun: 17, closed_wd: false, closed_sat: false, closed_sun: false, staffs: [ADMIN_NAME], staffCredentials: [{ name: ADMIN_NAME, username: 'admin', password: '', isAdmin: true }], accessories: [], roomConfig: ROOMS, roomStatus: {}, roomHidden: {}, announcement: '', bookingConfig: {} });
@@ -1503,8 +1503,19 @@
   const releaseAll = () => { waiters.forEach(f => f()); waiters = []; };
   const authReady = new Promise(res => {
     if (DEMO) return res();
-    auth.onAuthStateChanged(u => { res(); if (u) releaseAll(); if (!u) { try { if (sessionStorage.getItem('adminUser')) { sessionStorage.removeItem('adminUser'); location.reload(); } } catch (e) { } } });
+    auth.onAuthStateChanged(u => { res(); if (u) { releaseAll(); tryRestore(u); } if (!u) { try { if (sessionStorage.getItem('adminUser')) { sessionStorage.removeItem('adminUser'); location.reload(); } } catch (e) { } } });
   });
+  // เปิดหน้าใหม่ แล้ว Firebase ยังจำการล็อกอินไว้ -> เข้าระบบให้อัตโนมัติ (ยกเว้นผู้ใช้กดออกจากระบบเอง)
+  async function tryRestore(u) {
+    try {
+      if (sessionStorage.getItem('adminUser') || sessionStorage.getItem('fbRestoring') || localStorage.getItem('fbNoRestore')) return;
+      sessionStorage.setItem('fbRestoring', '1'); await getSet();
+      const un = (u.email || '').split('@')[0].toLowerCase(), c = SET.staffCredentials.find(x => (x.username || '').toLowerCase() === un);
+      const isAdmin = un === 'admin' || (c && (c.isAdmin || c.name === ADMIN_NAME));
+      sessionStorage.setItem('adminUser', JSON.stringify({ success: true, role: isAdmin ? 'admin' : 'staff', displayName: c ? c.name : (un === 'admin' ? ADMIN_NAME : un) }));
+      location.reload();
+    } catch (e) { }
+  }
   // ยังไม่ล็อกอิน = ไม่อ่าน/ไม่เขียนข้อมูล (คำขอจะรอจนกว่าจะล็อกอิน)
   const authed = async () => { await authReady; if (DEMO ? !loggedIn : !auth.currentUser) await new Promise(() => { }); };
   const ensure = async () => { await authed(); await getSet(); start(); await ready; };
@@ -1548,6 +1559,17 @@
   const idsOf = s => String(s || '').split(',').map(x => x.trim()).filter(Boolean);
   const details = (ids, st, en) => ids.map(id => ({ studentId: id, email: id + '@student.chula.ac.th', startTime: st, endTime: en }));
 
+  // รหัสนิสิต 1 รหัสอยู่ได้ทีละห้องในเวลาเดียวกัน (รวมคิวที่แอดมินลงให้)
+  function idClash(ids, date, st, en, excludeId) {
+    for (const id of ids) {
+      for (const x of BK) {
+        if (x.id === excludeId || x.date !== date || x.status === 'cancelled' || x.status === 'checked_out' || !(x.studentIds || []).includes(id)) continue;
+        const d = (x.studentDetails || []).find(z => z.studentId === id) || x;
+        if (st < d.endTime && en > d.startTime) return 'รหัส ' + id + ' มีคิวอื่นซ้อนเวลานี้อยู่แล้ว (' + x.roomName + ' ' + x.startTime + '-' + x.endTime + ')';
+      }
+    }
+    return '';
+  }
   const FN = {
     async checkStaffLogin(u, p) {
       u = (u || '').trim(); const email = u.includes('@') ? u : u.toLowerCase() + DOM;
@@ -1557,6 +1579,7 @@
       const un = u.split('@')[0].toLowerCase(), c = SET.staffCredentials.find(x => (x.username || '').toLowerCase() === un);
       const isAdmin = un === 'admin' || (c && (c.isAdmin || c.name === ADMIN_NAME));
       const name = c ? c.name : (un === 'admin' ? ADMIN_NAME : un);
+      try { localStorage.removeItem('fbNoRestore'); } catch (e) { }
       logIt({ userName: name, action: 'LOGIN_SUCCESS', status: 'SUCCESS', details: 'Role: ' + (isAdmin ? 'admin' : 'staff') });
       return { success: true, role: isAdmin ? 'admin' : 'staff', displayName: name };
     },
@@ -1586,8 +1609,10 @@
       return { success: true };
     },
     async saveBooking(fd) {
-      await ensure(); const ids = idsOf(fd.studentIDs), h = hours(fd.bookingDate), en = fd.endTime || String(h.close).padStart(2, '0') + ':00';
+      await ensure(); const rawIds = idsOf(fd.studentIDs), ids = [...new Set(rawIds)], h = hours(fd.bookingDate), en = fd.endTime || String(h.close).padStart(2, '0') + ':00';
       if (BK.some(b => b.roomName === fd.roomName && b.date === fd.bookingDate && b.status !== 'cancelled' && b.status !== 'checked_out' && fd.startTime < b.endTime && en > b.startTime)) return { success: false, message: 'ช่วงเวลานี้ถูกจองแล้ว' };
+      if (ids.length !== rawIds.length) return { success: false, message: 'รหัสนิสิตซ้ำกันในรายการ กรุณาตรวจสอบ' };
+      const clash = idClash(ids, fd.bookingDate, fd.startTime, en, null); if (clash) return { success: false, message: clash };
       const code = 'W' + Date.now().toString(36).slice(-5).toUpperCase();
       const dl = Math.max(Date.now(), new Date(fd.bookingDate + 'T' + fd.startTime + ':00').getTime()) + 9e5;
       const soon = new Date(fd.bookingDate + 'T' + fd.startTime + ':00').getTime() - Date.now() <= 9e5; // walk-in ที่เคาน์เตอร์ = นิสิตมาแล้ว ยืนยันทันที
@@ -1597,7 +1622,10 @@
     },
     async updateFullBooking(row, fd) {
       await ensure(); const id = revMap[row]; if (!id) return { success: false, message: 'ไม่พบรายการจอง' };
-      const ids = idsOf(fd.studentIDs), o = { bookerName: clean(fd.userName) || 'เคาน์เตอร์', studentIds: ids, bookerEmail: fd.userEmail || '', roomName: fd.roomName, roomId: roomIdOf(fd.roomName), date: fd.bookingDate, startTime: fd.startTime, endTime: fd.endTime, studentDetails: details(ids, fd.startTime, fd.endTime) };
+      const rawIds = idsOf(fd.studentIDs), ids = [...new Set(rawIds)];
+      if (ids.length !== rawIds.length) return { success: false, message: 'รหัสนิสิตซ้ำกันในรายการ กรุณาตรวจสอบ' };
+      const clash = idClash(ids, fd.bookingDate, fd.startTime, fd.endTime, id); if (clash) return { success: false, message: clash };
+      const o = { bookerName: clean(fd.userName) || 'เคาน์เตอร์', studentIds: ids, bookerEmail: fd.userEmail || '', roomName: fd.roomName, roomId: roomIdOf(fd.roomName), date: fd.bookingDate, startTime: fd.startTime, endTime: fd.endTime, studentDetails: details(ids, fd.startTime, fd.endTime) };
       if (fd.accessories !== undefined) { o.accessories = fd.accessories; o.accStaff = (fd.accessories || '').trim() ? (fd.staffName || '') : ''; }
       if (fd.ignoreLateCancel !== undefined) o.ignoreLateCancel = !!fd.ignoreLateCancel;
       await db.collection('bookings').doc(id).update(o);
@@ -4472,6 +4500,7 @@
     function loadStats() { clearTimeout(statsTimer); statsTimer = setTimeout(_doLoadStats, 300); }
 
     function _doLoadStats() {
+        if (typeof currentUser === 'undefined' || !currentUser) return; // ยังไม่ล็อกอิน
       // ✅ FIX: ใช้ค่าว่างแทน "Admin (ส่วนกลาง)" เป็นสัญญาณ "ดูทั้งหมด" — ป้องกันชนกับชื่อจริง
       // ของ user ที่ชื่อ Admin (ส่วนกลาง) เอง ซึ่งเดิมจะไม่มีทางเห็นสถิติของตัวเองล้วนๆ ได้เลย
       const staff = statViewMode === 'all'
@@ -4945,6 +4974,7 @@
   .admin-table thead th.room-col{left:0;z-index:40!important;background:var(--text-main)!important;color:var(--bg-card)!important}
   .admin-table tbody td.room-col{z-index:20!important}
   .fbk-gh{z-index:15}
+  tr.fbk-group td.fbk-gtd{text-align:left!important}
   #scheduleContent{max-height:calc(100vh - 150px)!important;min-height:360px}
   /* โหมดแถวกะทัดรัด: เห็นภาพรวมทั้งตารางโดยเลื่อนน้อยลง */
   table.fbk-compact thead th{padding:4px 0 4px 4px!important;font-size:.85rem!important}
